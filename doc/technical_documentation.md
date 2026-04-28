@@ -288,26 +288,46 @@ little-endian to the bytes `20 21 6F 67` — read left-to-right that's
 `" !og"`, which is where the section name "OG" comes from (the readable
 suffix after the leading space byte).
 
-**Status: deprecated / unhandled by Apple's modern macOS host stack.**
+**Status: still sent by iOS, but unhandled by Apple's modern macOS host stack. qvh's 8-zero-byte reply is what keeps the session alive.**
 
-The OG packet's wire bytes (FourCC `0x676F2120`, in either-byte-ordering
-encoding) appear **nowhere** in `MediaToolbox.framework`,
-`CoreMedia.framework`, `iOSScreenCaptureAssistant`, the `iOSScreenCapture`
-plugin, or anywhere else in the macOS Sequoia (15.5)
-`dyld_shared_cache_arm64e`. There is no host-side handler for OG in
-modern macOS — the iOS device may or may not still send it (qvh's
-historical capture shows it being sent and replied to with 8 zero bytes;
-empirical testing on modern devices would clarify), but Apple's host
-silently drops it via the dispatcher's default fall-through.
+Empirical (iOS 18, macOS 15.5):
 
-Possibilities:
-- iOS firmware may have stopped sending OG entirely.
-- iOS may still send OG but only under specific conditions Apple's
-  modern stack doesn't trigger.
-- Apple's host treats it as a no-op (the inbound dispatcher's "unknown
-  type" path which simply returns).
+- **The device still sends OG.** Running qvh against a current iPhone for
+  ~12 seconds shows exactly one inbound `SYNC_OG{Unknown:1}` arriving
+  during initial session setup. So the packet is not deprecated on the
+  device side; it remains part of the handshake.
+- **Apple's macOS host has no OG handler anywhere.** The wire bytes
+  (FourCC `0x676F2120`, either byte ordering) appear **nowhere** in
+  `MediaToolbox.framework`, `CoreMedia.framework`,
+  `iOSScreenCaptureAssistant`, the `iOSScreenCapture` plugin, or
+  anywhere else in the macOS Sequoia (15.5)
+  `dyld_shared_cache_arm64e` (1.6 GB+ of arm64e code across both cache
+  files). The only byte-pattern hit is in
+  `HealthDaemon`'s log message *"Here we go! Delegate asked to perform
+  work!"* — completely unrelated.
+  This was verified two ways: (1) byte-pattern search across all
+  extracted Mach-Os and the dyld cache; (2) disassembly-based scan that
+  reconstructs 32-bit immediates from arm64 `movz`/`movk` pairs (per
+  the methodology note in section 7).
+- **What Apple's host does on receipt:** the inbound packet dispatcher
+  in `MediaToolbox.framework` (the giant function near
+  `_FigNeroTeardown` on macOS 15.5) is a binary-tree FourCC dispatch.
+  Any FourCC that doesn't match a known case falls through to the
+  function's default return path — i.e., the OG packet is silently
+  dropped without acknowledgement.
+- **What qvh does on receipt** (in `screencapture/packet/sync_og.go`):
+  parses the 4-byte payload (`Unknown:1`), constructs a 24-byte
+  `RPLY` with the correlation ID and 8 zero bytes of body, and sends
+  it back. The device evidently expects *some* reply (otherwise the
+  session would stall waiting for it), but the content is irrelevant
+  — 8 zeros is what qvh has always sent and the device is happy.
 
-qvh's existing 8-zero-byte reply is fine and harmless either way.
+So OG is essentially a **vestigial handshake step**: the device asks,
+the host has to answer, the host's answer is ignored, and the session
+continues. Apple's QuickTime Player presumably either still has OG
+support somewhere we haven't found or has deprecated it (with the
+device tolerating the dropped reply). qvh's existing handling is
+correct and necessary — do not remove it.
 
 ##### Request Format Description (historical, from qvh's original capture)
 
