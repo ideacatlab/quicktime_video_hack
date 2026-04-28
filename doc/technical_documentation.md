@@ -501,7 +501,87 @@ Check out https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.9.sdk/Sys
 I think the references in ASYN and SYNC packets are for CMClocks. So for sending a CMTime request I just a monotonic (DO NOT USE WALLCLOCK TIME) clock
 to send a time difference in nanoseconds (Scale == 1000000000). It seems to work fine :-D
 
-## 6. Verifying / Extending This Document with Claude Code
+## 6. Format Constraints — What's Locked vs What's Negotiable
+
+This section documents empirical results from **testing actual HPD1 dictionary
+variants against a current iOS device** (iPhone, iOS 18), comparing the
+recorded output against the changes Apple's modern host code (in
+`MediaToolbox.framework/FigNero` and `iOSScreenCaptureAssistant`) makes to
+the HPD1 dict at runtime.
+
+### What the protocol locks (do not bother changing in qvh)
+
+- **Video codec is always H.264.** Apple's `HPD1` builder advertises HEVC
+  decoder capability via the dictionary keys `HEVCDecoderSupports444` and
+  (when the user opts in via `defaults write com.apple.coremedia neroEnableHEVC44410 -int 1`)
+  `HEVCDecoderSupports44410`. When tested against a current iPhone, the
+  device **ignores these keys** — adding `HEVCDecoderSupports44410: true`
+  to the HPD1 dict produces an output whose codec is still
+  `H.264 / High profile` (verified with `ffprobe`). The HEVC capability
+  advertisement is decorative on this transport; the iOS-USB QuickTime
+  mirror protocol always emits H.264 NALUs in the FEED packets.
+- **Audio codec is always LPCM 48 kHz, 16-bit, stereo.** Apple's
+  `iOSScreenCaptureAssistant` references no other audio FormatID
+  (`lpcm`/`0x6c70636d`) anywhere in its disassembly — no `aac `, `ac-3`,
+  `ec-3`, etc. The AAC/AC-3 references that appear in `MediaToolbox.framework`
+  are for HLS/AirPlay/AVFoundation, not for this transport.
+- **Video resolution is always the iPhone's native screen resolution.**
+  The HPD1 dict has a `DisplaySize: { Width, Height }` sub-dict, but the
+  device ignores the requested size — setting `DisplaySize: 640x480` still
+  produces a stream at the device's native resolution
+  (e.g., 1206×2622 on a recent iPhone). `DisplaySize` is advisory.
+
+### What the HPD1 dict *does* require
+
+- **`Valeria: true` is mandatory.** Removing this key from qvh's HPD1
+  dict (e.g., to send a "pure Apple-style" dict containing only
+  `H264DecoderSupports444 / HEVCDecoderSupports444 / HEVCDecoderSupports44410`)
+  causes the device's response stream to be malformed: the FEED packets
+  arrive without proper PPS, and `ffprobe` reports
+  `non-existing PPS 0 referenced` / `decode_slice_header error`. The
+  resulting `.h264` file is a few kilobytes of garbage instead of the
+  expected several megabytes per second.
+  Empirical takeaway: **`Valeria: true` must stay** even though Apple's
+  own host code does not include it. It's part of the activation contract.
+
+### Which dictionary keys Apple's modern host code uses
+
+Reverse-engineered from `iOSScreenCaptureAssistant`'s call into the HPD1
+builder helper in `MediaToolbox.framework`:
+
+```c
+// Pseudocode of Apple's HPD1 builder (function at vaddr 0x1915827e0 on macOS 15.5):
+buildHpd1Dict() {
+    if (FVDUtilsH264DecoderSupports444()) {
+        dict["H264DecoderSupports444"] = true;
+    }
+    if (FVDUtilsHEVCDecodeSupported()) {
+        if (CFPreferencesGetAppIntegerValue("neroEnableHEVC", "com.apple.coremedia") >= 1) {
+            dict["HEVCDecoderSupports444"] = true;
+        }
+        if (CFPreferencesGetAppIntegerValue("neroEnableHEVC44410", "com.apple.coremedia") >= 1) {
+            dict["HEVCDecoderSupports44410"] = true;
+        }
+    }
+    sendHPD1(dict);
+}
+```
+
+So Apple's HPD1 is purely a runtime capability advertisement that mirrors
+the host's own decoder support and user-toggleable preferences. It does
+not control the device's encoder behavior on this transport.
+
+### Practical takeaway
+
+qvh's hardcoded `Valeria: true`, `HEVCDecoderSupports444: true`, and
+`DisplaySize: 1920x1200` in `CreateHpd1DeviceInfoDict()` are
+operationally correct as-is. There is no audio or video format flexibility
+to expose; the protocol is **single-codec, native-resolution** by design.
+If you ever discover an iOS firmware change that loosens this, please
+update this section — but as of iOS 18 / macOS 15.5, the constraint
+holds.
+
+## 7. Verifying / Extending This Document with Claude Code
 
 This document was originally hand-reverse-engineered by sniffing USB traffic.
 On modern macOS, the same protocol is **still implemented end-to-end by
