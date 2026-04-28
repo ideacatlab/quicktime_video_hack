@@ -449,6 +449,12 @@ Here are the value types I know about:
 |vbmn|nmbv|NSNumber|[4.4 NSNumber](#44-nsnumber)|
 |tcid|dict|String or Index Key dict| see above |
 |csdf|fdsc|CMFormatDescription|[4.5 CMFormatDescription](#45-cmformatdescription)|
+|vlru|urlv|CFURL — body is the UTF-8 of `CFURLCopyAbsoluteURL(value).GetString()`. Same on-wire format as `strv`, just a different magic. |https://example.com/x|
+|vetd|dtev|CFDate — body is exactly 8 bytes, an IEEE-754 little-endian `double` representing seconds since the **CFAbsoluteTime epoch (2001-01-01 00:00:00 UTC)**.|`0.0` is exactly that epoch|
+|yara|aray|CFArray — wrapping atom whose body is a sequence of nested value atoms (each one a recursive value of any of the types in this table, including another `aray`).|`[strv("hi"), bulv(true)]`|
+|srlc|clrs|CGColorSpace — 1-byte body. `0x01` = `kCGColorSpaceDeviceRGB`, `0x00` = `kCGColorSpaceDeviceGray`. Apple's serializer (`sbufAtom_appendColorSpaceAtom`) errors out on any other CGColorSpace.|`0x01`|
+
+The four entries above (`urlv`, `dtev`, `aray`, `clrs`) were not in earlier versions of this document; they were discovered by reversing Apple's modern `sbufAtom_appendCFTypeAtom` (in `iOSScreenCaptureAssistant`, source file `FigSampleBufferAtomSerialization.c`). qvh implements all of them as of the version that ships this doc — see `screencapture/coremedia/dict.go` and `dict_serializer.go`.
 
 
 #### 4.1.2 Dictionaries with 4-Byte Integer Index Keys
@@ -476,6 +482,15 @@ I have seen three different types:
 |---|---|---|
 |76626D6E | 03000000| 01000000 |
 
+#### Note on the full set of types
+
+Apple's encoder uses the generic `[u8 CFNumberType][N raw bytes]` layout
+where `N = CFNumberGetByteSize(value)`. All 16 `CFNumberType` values
+defined by CoreFoundation can in principle appear on the wire (kCFNumberSInt8Type=1
+through kCFNumberCGFloatType=16). The three types listed above (3, 4, 6) are
+the ones observed during the original reverse engineering, but a robust
+parser should handle the rest gracefully rather than panicking.
+
 
 
 ### 4.5 CMFormatDescription
@@ -485,3 +500,135 @@ Check out https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.9.sdk/Sys
 ## 5. Clocks and CMSync
 I think the references in ASYN and SYNC packets are for CMClocks. So for sending a CMTime request I just a monotonic (DO NOT USE WALLCLOCK TIME) clock
 to send a time difference in nanoseconds (Scale == 1000000000). It seems to work fine :-D
+
+## 6. Verifying / Extending This Document with Claude Code
+
+This document was originally hand-reverse-engineered by sniffing USB traffic.
+On modern macOS, the same protocol is **still implemented end-to-end by
+Apple's own host-side stack** (QuickTime Player → CoreMediaIO →
+`iOSScreenCaptureAssistant` → MediaToolbox/`FigNero` → CoreMedia/`FigTransportConnectionUSB` →
+IOUSBLib bulk endpoints). That means anyone with a Mac can cross-check
+this document against Apple's compiled implementation, find new packet
+types Apple may have added, and submit fixes.
+
+The easiest way to do this is to paste the prompt below into
+[Claude Code](https://claude.com/claude-code) inside a fresh checkout of
+[`quicktime_video_hack`](https://github.com/danielpaulus/quicktime_video_hack)
+on a Mac with the iPhone screen-recording stack installed (i.e., any
+recent macOS with QuickTime Player.app). Claude will install the tools it
+needs, extract the relevant Apple frameworks from the dyld shared cache,
+disassemble them, and report concrete diffs against this repo.
+
+### Required tools (Claude will install if missing)
+- [`ipsw`](https://github.com/blacktop/ipsw) — pulls individual frameworks out of `dyld_shared_cache_arm64e`
+- Ghidra (optional, for decompilation; otool / `dyld_info` / `nm` are usually enough)
+- An iPhone connected via USB (only needed for the empirical activation test)
+
+### Copy-paste verification prompt
+
+> Reverse-engineer Apple's modern macOS implementation of the QuickTime
+> iOS-USB screen-mirroring protocol and audit
+> `doc/technical_documentation.md` in this repo against it.
+> Report concrete divergences as patchable diffs.
+>
+> **Key context the user already verified, do not re-derive:**
+> - The iOS device retains the legacy "QuickTime mirror" USB
+>   configuration descriptor and reveals it on demand. macOS's modern
+>   stack still uses it, just split across two frameworks.
+> - Apple's host-side code lives in two extracted dylibs from
+>   `/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e`:
+>     * `CoreMedia.framework` — transport layer (`FigTransportConnectionUSB`,
+>       `usb_clientThreadMain`, `usb_readCompleted`, `usb_messageSendingThreadMain`,
+>       `usb_clientSendStartupPing`, etc.) — owns the
+>       `[u32 LE length][u32 LE FourCC magic][payload]` framing where length
+>       INCLUDES the 4 length bytes, plus the ping/keepalive.
+>     * `MediaToolbox.framework` — protocol semantics (`FigNero`) — owns
+>       the inner sync/asyn subtype dispatch (cwpa, cvrp, afmt, feed, eat!,
+>       hpd0, hpd1, hpa0, clok, skew, srat, sprp, tbas, tjmp, need, rels).
+> - Atom serialization (CMSampleBuffer → QuickTime atoms) lives in
+>   `/System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/iOSScreenCapture.plugin/Contents/Resources/iOSScreenCaptureAssistant`,
+>   in functions named `sbufAtom_*` (the source file is
+>   `FigSampleBufferAtomSerialization.c`, leaked in the binary as a
+>   `__cstring` reference). Apple's `sbufAtom_appendCFTypeAtom`
+>   dispatches on 10 CFType variants whose magics map to the value-type
+>   table in `doc/technical_documentation.md` §4.1.
+>
+> **Methodology gotcha (read this before you grep for FourCC bytes):**
+> arm64 has no single 32-bit-immediate move. A constant like
+> `0x61666D74` ("afmt") is loaded as `movz wN, #0x6D74; movk wN, #0x6166, lsl #16`,
+> so the four ASCII bytes `61 66 6D 74` are NEVER contiguous in the binary.
+> A naïve `xxd | grep` will not find them. Either disassemble and
+> reconstruct the immediate from the movz/movk pair, or scan
+> `__TEXT,__const` and `__DATA_CONST,__const` for u32 windows that decode
+> to printable ASCII (in either endianness — Apple stores them
+> little-endian numerically so the bytes appear reversed).
+>
+> **Concrete steps:**
+>
+> 1. Install `ipsw` if missing: `brew install ipsw`. Optional: `brew install ghidra`
+>    if you want decompilation. Otherwise `otool`, `nm`, `dyld_info` from
+>    Xcode Command Line Tools are sufficient.
+>
+> 2. Extract the three relevant binaries to `/tmp/qvh-re/`:
+>    ```bash
+>    mkdir -p /tmp/qvh-re
+>    DSC=/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e
+>    ipsw dyld extract "$DSC" CoreMedia    -o /tmp/qvh-re --slide --objc
+>    ipsw dyld extract "$DSC" MediaToolbox -o /tmp/qvh-re --slide --objc
+>    lipo -thin arm64e -output /tmp/qvh-re/iSCAssistant.arm64e \
+>      "/System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/iOSScreenCapture.plugin/Contents/Resources/iOSScreenCaptureAssistant"
+>    ```
+>
+> 3. Dump every FourCC immediate Apple's code uses (handles the arm64
+>    movz/movk trap correctly). Use a small Python script that scans
+>    `otool -arch arm64e -tV <binary>` output, reconstructing each
+>    32-bit immediate by pairing `movz`/`movk` instructions targeting the
+>    same register, then filtering for printable-ASCII results. Run it
+>    against all three binaries and produce three sorted FourCC lists.
+>
+> 4. Diff each list against the constants defined in qvh:
+>    - `screencapture/packet/sync.go`, `packet/asyn.go`, `packet/ping.go`,
+>      and the per-subtype `packet/sync_*.go` / `packet/asyn_*.go` files —
+>      these are the wire-protocol subtypes and should match what's in
+>      `MediaToolbox`.
+>    - `screencapture/coremedia/dict.go` (and `common/nsnumber.go`) — the
+>      atom value-type magics and any new ones from `iSCAssistant`'s
+>      `sbufAtom_appendCFTypeAtom` (which lives at the address that
+>      contains immediates `0x6e6d6276` (nmbv) and `0x73747276` (strv) —
+>      the dispatcher hub).
+>    - `screencapture/coremedia/cmsamplebuf.go` — the CMSampleBuffer atom
+>      layout. Compare against `iSCAssistant`'s `sbufAtom_appendSampleSizes`,
+>      `sbufAtom_appendSampleTimingInfo`, etc.
+>
+>    Highlight any FourCC Apple uses that qvh does not. For each, find
+>    the function it lives in (walk backward from the immediate's address
+>    looking for the `pacibsp` prologue) and read enough surrounding
+>    disassembly to determine the body layout (length, fields, byte
+>    order). Report the on-wire byte format, the corresponding qvh source
+>    file, and the concrete change needed.
+>
+> 5. Optional empirical sanity check: while an iPhone is plugged in,
+>    capture `ioreg -p IOUSB -l` and `system_profiler SPUSBDataType`,
+>    then open QuickTime Player → File → New Movie Recording → select
+>    the iPhone, and re-capture. The iPhone should re-enumerate and
+>    `bNumConfigurations` should increment by 1, with
+>    `kUSBCurrentConfiguration` switching into the new config. That
+>    confirms QuickTime Player is using the same legacy USB
+>    configuration descriptor that qvh activates via
+>    `Control(0x40, 0x52, 0x00, 0x02, response)`.
+>
+> 6. Output a `FINDINGS.md` summarizing:
+>    - The architectural map (transport vs semantics layering)
+>    - For each diverging FourCC: file:line in qvh + concrete byte layout + a one-line patch description
+>    - Anything you couldn't determine from disasm alone
+>    - The full disassembly methodology you used (so the next person can reproduce)
+>
+> 7. If patches are obvious and small, write them as concrete code
+>    changes against the qvh source tree (do not commit). Run
+>    `go test ./...` and only call the patches done if all tests pass.
+>    Do NOT push or create PRs without explicit approval.
+
+The prompt above intentionally tells Claude what's already known so it
+doesn't waste time rediscovering the architecture, and warns about the
+specific arm64-FourCC-search trap that consumed many hours during the
+original investigation.
