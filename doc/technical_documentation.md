@@ -282,9 +282,34 @@ If implemented correctly, we should see that the skew responses converge towards
 
 #### 3.2.8. OG Packet
 ##### General Description
-I do not know what this does or what it is for. It seems like it sends one uint32 as payload that is always equal to 1 and 
-we have to reply back with a 8bytes zero
-##### Request Format Description
+**Magic constant:** `OG = 0x676F2120` (defined in
+`screencapture/packet/sync.go`). On the wire, this serializes
+little-endian to the bytes `20 21 6F 67` — read left-to-right that's
+`" !og"`, which is where the section name "OG" comes from (the readable
+suffix after the leading space byte).
+
+**Status: deprecated / unhandled by Apple's modern macOS host stack.**
+
+The OG packet's wire bytes (FourCC `0x676F2120`, in either-byte-ordering
+encoding) appear **nowhere** in `MediaToolbox.framework`,
+`CoreMedia.framework`, `iOSScreenCaptureAssistant`, the `iOSScreenCapture`
+plugin, or anywhere else in the macOS Sequoia (15.5)
+`dyld_shared_cache_arm64e`. There is no host-side handler for OG in
+modern macOS — the iOS device may or may not still send it (qvh's
+historical capture shows it being sent and replied to with 8 zero bytes;
+empirical testing on modern devices would clarify), but Apple's host
+silently drops it via the dispatcher's default fall-through.
+
+Possibilities:
+- iOS firmware may have stopped sending OG entirely.
+- iOS may still send OG but only under specific conditions Apple's
+  modern stack doesn't trigger.
+- Apple's host treats it as a no-op (the inbound dispatcher's "unknown
+  type" path which simply returns).
+
+qvh's existing 8-zero-byte reply is fine and harmless either way.
+
+##### Request Format Description (historical, from qvh's original capture)
 
 | 4 Byte Length (28)   |4 Byte Magic (SYNC)   | 8 Byte clock CFTypeID  |  4 bytes magic (OG!.) | 8 bytes correlation id | 4byte unknown int|
 |---|---|---|---|---|---|
@@ -330,11 +355,29 @@ This packet is used to set properties for the video stream. Usually you get only
 |20000000| 6E797361| 18BC2311 01000000 |70727073 | 00..... |
 
 
-##### 3.3.2. Asyn SRAT - Set time rate and Anchor
+##### 3.3.2. Asyn SRAT - Set Rate and Anchor
 ###### General Description
-I think this one along with TJMP, TBAS and CLOK is part of some kind of clock synchronization algorithm. 
-I believe it is related to what AVPlayer.SetRate usually does. 
-It could also tell us to invoke this on our clock: CMTimebaseSetRateAndAnchorTime https://developer.apple.com/documentation/coremedia/cmtimebase?language=objc
+**Confirmed: this is a `CMTimebaseSetRateAndAnchorTime` invocation from the device.**
+
+Reverse-engineering of Apple's host-side handler in `MediaToolbox.framework`
+(inside the inbound packet dispatcher near the `_FigNeroTeardown` exported
+symbol; the SRAT comparison sits at vaddr `0x191583444`) confirms the
+guess in the original document. The handler:
+1. Reads 4 bytes at payload offset 0 → a 32-bit value (interpreted by
+   the host as the new playback rate; commonly the IEEE-754 float `1.0`,
+   i.e., bytes `00 00 80 3F`).
+2. Reads 4 bytes at offset 4 → a second 32-bit value (likely a flags
+   word; observed identical to the rate, but Apple's code treats it
+   independently).
+3. Reads a 24-byte `CMTime` at offset 8 → the anchor time.
+4. Looks up the timebase via `CMAudioFormatDescriptionGetFormatList`
+   (function pointer mislabeled by the disassembler due to PAC; the
+   actual call is into a CoreMedia timebase API, equivalent to
+   [`CMTimebaseSetRateAndAnchorTime`](https://developer.apple.com/documentation/coremedia/1641894-cmtimebasesetrateandanchortime)).
+
+So the device is telling the host: "set the timebase rate to X with
+anchor at this CMTime." qvh's send-side / response-side handling
+(which doesn't reply, since this is asynchronous) is correct.
 
 ###### Packet Format Description
 
@@ -345,9 +388,28 @@ It could also tell us to invoke this on our clock: CMTimebaseSetRateAndAnchorTim
 
 ##### 3.3.3. Asyn TBAS - Set TimeBase
 ###### General Description
-This one contains a clockRef and another clockRef that I do not know about. It could be that we are supposed to create a CMTimeBase for our clock with the 
-given ref. Also I think it could be that the device created a CMTimeBase and just tells us about it. 
-So far, I could not find another usage of the Unknown Clock/TimeBaseRef we get in the whole communication. 
+**Confirmed: the device informs the host of a CMTimebaseRef it should
+treat as the source-of-truth timebase.**
+
+Reverse-engineering of Apple's host-side handler at vaddr
+`0x191584148` in `MediaToolbox.framework` shows that on receipt of a
+TBAS packet, the host:
+1. Reads the 8-byte payload (the unknown ClockRef from the original doc).
+2. Compares it against the currently-stored timebase ref at offset
+   `+0x78` of the dispatcher's per-stream state.
+3. If different, **stores the new ref** in that slot, overwriting the
+   previous value.
+4. Calls `_FigRenderPipelineGetFigBaseObject` to update the render
+   pipeline binding.
+
+So the original speculation in the doc — *"the device created a
+CMTimeBase and just tells us about it"* — is correct. The 8-byte value is
+a `CMTimebaseRef` minted on the device side; the host stashes it and
+references it for subsequent sample-buffer timing operations on the
+device-side timebase. (The reason qvh "could not find another usage"
+of the ref is that it's used purely as a timebase identity tag for
+later cross-referencing; nothing visible ever queries it back over the
+wire.)
 
 ###### Packet Format Description
 
@@ -357,15 +419,37 @@ So far, I could not find another usage of the Unknown Clock/TimeBaseRef we get i
 
 ##### 3.3.4. Asyn TJMP - Time Jump Notification
 ###### General Description
-I think this packet tells us that a CMTimeBase on the device was set to a different time. 
-As this is not referenced or used anywhere else, I don't know exactly what it means or what the values are for. 
+**Confirmed: this is a "time jump on the device's timebase" notification.**
 
-The payload is 56 bytes. I think it could be like:  4byte int 0x0, 4byte 0x0, CMTime, CMTime but i do not know for sure.
-###### Packet Format Description
+Reverse-engineering of Apple's host-side handler in
+`MediaToolbox.framework` (inside the inbound dispatcher; the TJMP
+comparison sits at vaddr `0x1915832dc`) shows that the payload is
+**not** 56/72 bytes of unknown data — it's structured. The handler
+reads:
+1. 8 bytes at payload offset 0 → a `CFTypeID` / `CMClockRef` of the
+   timebase that jumped.
+2. 24 bytes at offset 8 → a `CMTime` — the **anchor time** of the new
+   timebase position.
+3. 24 bytes at offset 32 → a `CMTime` — the **current time** at the
+   moment of the jump.
 
-| 4 Byte Length (72)   |4 Byte Magic (ASYN)   | 8 Byte clock CFTypeID  |  4 bytes magic (TJMP) | 72bytes Unknown|
-|---|---|---|---|---|
-|48000000| 6E797361| 18BC2311 01000000 |706D6A74 | C0904402 01000000| 72 unknown bytes|
+The handler then calls
+[`CMTimebaseCreateReadOnlyTimebaseWithFlags`](https://developer.apple.com/documentation/coremedia/4030977-cmtimebasecreatereadonlytimebase)
+with those two `CMTime` values, creating a host-side read-only timebase
+that mirrors the device's. So TJMP is the device saying: *"my timebase
+has discontinuously jumped — re-anchor your read-only mirror to these
+(anchor, current) values."*
+
+This is consistent with `CMTimebase`'s semantics: a read-only timebase
+needs an anchor pair to compute future time. Whenever the device's
+clock seeks, pauses, or resyncs, it ships a TJMP so the host's mirror
+stays accurate.
+
+###### Packet Format Description (corrected)
+
+| 4 Byte Length (72)   |4 Byte Magic (ASYN)   | 8 Byte clock CFTypeID  |  4 bytes magic (TJMP) | 8 bytes timebase CFTypeID | 24 bytes anchor CMTime | 24 bytes current CMTime |
+|---|---|---|---|---|---|---|
+|48000000| 6E797361| 18BC2311 01000000 |706D6A74 | C0904402 01000000 | …24 bytes… | …24 bytes… |
 
 
 ##### 3.3.5 Asyn FEED - CMSampleBuffer with h264 Video Data
