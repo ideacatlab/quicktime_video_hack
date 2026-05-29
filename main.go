@@ -14,7 +14,7 @@ import (
 	"github.com/danielpaulus/quicktime_video_hack/screencapture"
 	"github.com/danielpaulus/quicktime_video_hack/screencapture/coremedia"
 	"github.com/danielpaulus/quicktime_video_hack/screencapture/diagnostics"
-	"github.com/danielpaulus/quicktime_video_hack/screencapture/gstadapter"
+
 	"github.com/docopt/docopt-go"
 	log "github.com/sirupsen/logrus"
 )
@@ -121,11 +121,7 @@ The commands work as following:
 			recordAudioWav(outfile, device)
 			return
 		}
-		if ogg {
-			recordAudioGst(outfile, device, gstadapter.OGG)
-			return
-		}
-		recordAudioGst(outfile, device, gstadapter.MP3)
+
 		return
 	}
 
@@ -229,16 +225,6 @@ func printExamples() {
 	fmt.Print(examples)
 }
 
-func recordAudioGst(outfile string, device screencapture.IosDevice, audiotype string) {
-	log.Debug("Starting Gstreamer with audio pipeline")
-	gStreamer, err := gstadapter.NewWithAudioPipeline(outfile, audiotype)
-	if err != nil {
-		printErrJSON(err, "Failed creating custom pipeline")
-		return
-	}
-	startWithConsumer(gStreamer, device, true)
-}
-
 func runDiagnostics(outfile string, dump bool, dumpFile string, device screencapture.IosDevice) {
 	log.Debugf("diagnostics mode: %s  dump:%t %s device:%s", outfile, dump, dumpFile, device.SerialNumber)
 	metricsFile, err := os.Create(outfile)
@@ -282,19 +268,11 @@ func recordAudioWav(outfile string, device screencapture.IosDevice) {
 }
 
 func startGStreamerWithCustomPipeline(device screencapture.IosDevice, pipelineString string) {
-	log.Debug("Starting Gstreamer with custom pipeline")
-	gStreamer, err := gstadapter.NewWithCustomPipeline(pipelineString)
-	if err != nil {
-		printErrJSON(err, "Failed creating custom pipeline")
-		return
-	}
-	startWithConsumer(gStreamer, device, false)
+
 }
 
 func startGStreamer(device screencapture.IosDevice) {
-	log.Debug("Starting Gstreamer")
-	gStreamer := gstadapter.New()
-	startWithConsumer(gStreamer, device, false)
+
 }
 
 // Just dump a list of what was discovered to the console
@@ -329,17 +307,17 @@ func activate(device screencapture.IosDevice) {
 }
 
 func deactivate(device screencapture.IosDevice) {
-        log.Debugf("Disabling device: %v", device)
-        var err error
-        device, err = screencapture.DisableQTConfig(device)
-        if err != nil {
-                printErrJSON(err, "Error disabling QT config")
-                return
-        }
+	log.Debugf("Disabling device: %v", device)
+	var err error
+	device, err = screencapture.DisableQTConfig(device)
+	if err != nil {
+		printErrJSON(err, "Error disabling QT config")
+		return
+	}
 
-        printJSON(map[string]interface{}{
-                "device_activated": device.DetailsMap(),
-        })
+	printJSON(map[string]interface{}{
+		"device_activated": device.DetailsMap(),
+	})
 }
 
 func record(h264FilePath string, wavFilePath string, device screencapture.IosDevice) {
