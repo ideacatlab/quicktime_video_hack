@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -149,15 +150,26 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 	// session is (re)armed; usbmuxd already holds config 5, so re-cycle the QT config
 	// repeatedly WHILE the reader above is listening, until the first bytes (PING)
 	// arrive. Without this the handshake is racy and usually never starts.
+	useModeTransition := os.Getenv("QVH_RESET_MODE_TRANSITION") == "1"
 	go func() {
 		for r := 0; r < 30 && atomic.LoadInt32(&gotData) == 0; r++ {
 			time.Sleep(2500 * time.Millisecond)
 			if atomic.LoadInt32(&gotData) != 0 {
 				return
 			}
-			log.Debugf("no CWPA/AV yet (retry %d); re-cycling QT config to re-arm full A/V", r)
-			sendQTDisableConfigControlRequest(usbDevice)
-			sendQTConfigControlRequest(usbDevice)
+			if useModeTransition {
+				// Clean re-arm: a real Apple mode transition initial(1) -> Valeria(2).
+				// Resets a stuck AV session properly (vs the disable(0)+enable(2) re-cycle,
+				// where wIndex 0 is not a valid mode so no true transition happens).
+				log.Debugf("no CWPA/AV yet (retry %d); SET_MODE 1->2 clean re-arm", r)
+				sendQTSetModeRequest(usbDevice, 1)
+				time.Sleep(400 * time.Millisecond)
+				sendQTSetModeRequest(usbDevice, 2)
+			} else {
+				log.Debugf("no CWPA/AV yet (retry %d); re-cycling QT config to re-arm full A/V", r)
+				sendQTDisableConfigControlRequest(usbDevice)
+				sendQTConfigControlRequest(usbDevice)
+			}
 		}
 	}()
 

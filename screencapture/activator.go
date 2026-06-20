@@ -110,3 +110,18 @@ func sendQTDisableConfigControlRequest(device *gousb.Device) {
 	}
 	log.Debugf("Disabled QT config RC:%d", val)
 }
+
+// sendQTSetModeRequest sends Apple's vendor-specific SET_MODE (0x52) with wIndex=mode.
+// This is the SAME command usbmuxd uses to switch Apple device modes
+// (1 = initial/config-4, 2 = "Valeria"/config-5 AV). A proper mode-1 -> mode-2 transition
+// is a REAL re-entry into Valeria and resets a stuck AV session, unlike the historical
+// disable(0)+enable(2) re-cycle (wIndex 0 is not a valid mode, so it is not a true
+// transition). Used by the flag-gated reset path in StartReading. See ideacatlab/usbmuxd
+// FIX_PLAN_ALI.md — long term this reset belongs inside usbmuxd (it owns the device).
+func sendQTSetModeRequest(device *gousb.Device, mode uint16) {
+	val, err := device.Control(0x40, 0x52, 0x00, mode, make([]byte, 0))
+	if err != nil {
+		log.Warnf("Failed SET_MODE(%d): %s", mode, err)
+	}
+	log.Debugf("SET_MODE(%d) RC:%d", mode, val)
+}
