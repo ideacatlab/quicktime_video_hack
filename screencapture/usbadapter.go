@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -101,6 +103,7 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 	}
 	log.Debug("Endpoint claimed")
 	log.Infof("Device '%s' USB connection ready, waiting for ping..", device.SerialNumber)
+	var gotData int32
 	go func() {
 		lengthBuffer := make([]byte, 4)
 		for {
@@ -109,6 +112,7 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 				log.Errorf("Failed reading 4bytes length with err:%s only received: %d", err, n)
 				return
 			}
+			atomic.StoreInt32(&gotData, 1)
 			//the 4 bytes header are included in the length, so we need to subtract them
 			//here to know how long the payload will be
 			length := binary.LittleEndian.Uint32(lengthBuffer) - 4
@@ -128,6 +132,22 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 				}
 			}
 			receiver.ReceiveData(dataBuffer)
+		}
+	}()
+
+	// Mode-2 reliability (ideacatlab): the device only emits PING right after the AV
+	// session is (re)armed; usbmuxd already holds config 5, so re-cycle the QT config
+	// repeatedly WHILE the reader above is listening, until the first bytes (PING)
+	// arrive. Without this the handshake is racy and usually never starts.
+	go func() {
+		for r := 0; r < 25 && atomic.LoadInt32(&gotData) == 0; r++ {
+			time.Sleep(1200 * time.Millisecond)
+			if atomic.LoadInt32(&gotData) != 0 {
+				return
+			}
+			log.Debugf("no AV data yet (retry %d); re-cycling QT config to re-arm PING", r)
+			sendQTDisableConfigControlRequest(usbDevice)
+			sendQTConfigControlRequest(usbDevice)
 		}
 	}()
 

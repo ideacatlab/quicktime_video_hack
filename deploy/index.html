@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>QVH live</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<style>
+ body{background:#0b0b0f;color:#e7e7ea;font-family:system-ui,sans-serif;text-align:center;margin:0;padding:18px}
+ video{max-width:96vw;max-height:78vh;background:#000;border:1px solid #333;border-radius:8px}
+ #s{opacity:.8;margin:10px}
+ code{background:#222;padding:2px 6px;border-radius:4px}
+</style></head><body>
+<h2>QVH live — iPhone hardware H.264 over USB → Cloudflare</h2>
+<p id="s">connecting…</p>
+<video id="v" controls autoplay muted playsinline></video>
+<p style="opacity:.6">If it says "waiting", tap/wake the phone via WDA — the screen must be awake to encode frames.</p>
+<script>
+var v=document.getElementById('v'), s=document.getElementById('s'), url='/stream.m3u8?t='+Date.now();
+function attach(){
+  if(window.Hls && Hls.isSupported()){
+    var h=new Hls({liveSyncDurationCount:2,lowLatencyMode:true,backBufferLength:5});
+    h.loadSource('/stream.m3u8'); h.attachMedia(v);
+    h.on(Hls.Events.MANIFEST_PARSED,function(){s.textContent='● live';v.play().catch(function(){})});
+    h.on(Hls.Events.ERROR,function(e,d){ if(d.fatal){ s.textContent='waiting for video stream… (tap the phone to wake the screen)'; h.destroy(); setTimeout(attach,2500);} });
+  } else if(v.canPlayType('application/vnd.apple.mpegurl')){ v.src='/stream.m3u8'; v.play().catch(function(){}); }
+}
+attach();
+</script></body></html>

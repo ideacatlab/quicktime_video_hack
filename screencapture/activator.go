@@ -20,19 +20,14 @@ func EnableQTConfig(device IosDevice) (IosDevice, error) {
 		return IosDevice{}, err
 	}
 	if isValidIosDeviceWithActiveQTConfig(usbDevice.Desc) {
-		// Mode-2 coexistence (ALI / ideacatlab): when usbmuxd runs with
-		// USBMUXD_DEFAULT_DEVICE_MODE=2 it puts the device on the Valeria config
-		// (config 5), where the usbmux/control interface (subclass 0xFE) and the AV
-		// interface (subclass 0x2A) live in the SAME config — so WDA/Appium control
-		// keeps working over usbmux while we stream H.264 over the AV interface.
-		// The device is already on config 5, but its AV session was never (re)armed
-		// for us, so it never sends PING. Re-cycle the QT config via disable+enable
-		// control transfers to re-arm the AV session WITHOUT a full re-enumeration,
-		// so control stays attached. (Verified on iPhone/iOS 16.7: PING + full audio
-		// handshake while the device remained controlled by WDA.)
-		log.Debugf("%s already on QT config (mode-2); re-cycling AV session via disable+enable", usbSerial)
-		sendQTDisableConfigControlRequest(usbDevice)
-		sendQTConfigControlRequest(usbDevice)
+		// Mode-2 coexistence (ALI / ideacatlab): usbmuxd (USBMUXD_DEFAULT_DEVICE_MODE=2)
+		// already put the device on the Valeria config (config 5), which carries BOTH
+		// the usbmux/control interface (0xFE) and the AV interface (0x2A) — so WDA
+		// control coexists. We do NOT re-arm here: the device only PINGs right after a
+		// re-arm, and at this point we are not yet reading the AV endpoint, so the PING
+		// would be lost. The re-arm (disable+enable) is done in StartReading WHILE we
+		// are listening, which makes the handshake reliable.
+		log.Debugf("%s already on QT config (mode-2); AV session will be re-armed by the reader", usbSerial)
 		return device, nil
 	}
 

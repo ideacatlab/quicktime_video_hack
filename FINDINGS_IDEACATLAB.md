@@ -66,3 +66,8 @@ config 5 (Valeria / AV mode):
 - [ ] PING retry loop in mode 2 for reliability.
 - [ ] `qvh gstreamer` → low-latency H.264 web stream (WebCodecs/MSE) → `cloudflared` tunnel → operator screen.
 - [ ] Integrate as the pod video source replacing WDA-MJPEG (flag-gated, MJPEG fallback).
+
+
+---
+## UPDATE 2026-06-20 — FULL POC WORKING END-TO-END
+Video confirmed: `SYNC_CVRP` (1126x2436 AVC-1 H.264) + HLS segments served through a Cloudflare tunnel, while the phone stayed WDA-`attached`. Reliability fixed by re-cycling the QT config *inside StartReading while reading* (see `screencapture/usbadapter.go`). Deploy pipeline in `deploy/`. Remaining polish: keep screen awake (auto-lock), tune encode/latency, optional WebRTC.
