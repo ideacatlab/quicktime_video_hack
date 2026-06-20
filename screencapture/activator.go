@@ -20,7 +20,19 @@ func EnableQTConfig(device IosDevice) (IosDevice, error) {
 		return IosDevice{}, err
 	}
 	if isValidIosDeviceWithActiveQTConfig(usbDevice.Desc) {
-		log.Debugf("Skipping %s because it already has an active QT config", usbSerial)
+		// Mode-2 coexistence (ALI / ideacatlab): when usbmuxd runs with
+		// USBMUXD_DEFAULT_DEVICE_MODE=2 it puts the device on the Valeria config
+		// (config 5), where the usbmux/control interface (subclass 0xFE) and the AV
+		// interface (subclass 0x2A) live in the SAME config — so WDA/Appium control
+		// keeps working over usbmux while we stream H.264 over the AV interface.
+		// The device is already on config 5, but its AV session was never (re)armed
+		// for us, so it never sends PING. Re-cycle the QT config via disable+enable
+		// control transfers to re-arm the AV session WITHOUT a full re-enumeration,
+		// so control stays attached. (Verified on iPhone/iOS 16.7: PING + full audio
+		// handshake while the device remained controlled by WDA.)
+		log.Debugf("%s already on QT config (mode-2); re-cycling AV session via disable+enable", usbSerial)
+		sendQTDisableConfigControlRequest(usbDevice)
+		sendQTConfigControlRequest(usbDevice)
 		return device, nil
 	}
 
