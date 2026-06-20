@@ -16,7 +16,9 @@ timeout "$SECS" "$QVH" record "$H" "$W" --udid="$UDID" -v 2>"$LOG"
 PING=$(grep -c "PING received" "$LOG"); CWPA=$(grep -c SYNC_CWPA "$LOG")
 CVRP=$(grep -c CVRP "$LOG"); TIME=$(grep -c SYNC_TIME "$LOG"); RECYC=$(grep -c "re-cycling\|re-arm" "$LOG")
 H264=$(stat -c%s "$H" 2>/dev/null || echo 0); WAV=$(stat -c%s "$W" 2>/dev/null || echo 0)
-NOIFACE=$(grep -cE "not activated|Could not retrieve config|MuxConfig 4|device not activated" "$LOG")
+# genuine "no AV interface" only — NOT the "Found MuxConfig 4" enumeration line (qvh lists
+# every available config 1..5 even when the device is correctly on config 5).
+NOIFACE=$(grep -cE "device not activated for screen mirroring|could not get Quicktime Interface|Could not retrieve config" "$LOG")
 if   [ "${H264:-0}" -gt 1000 ];               then STATE="FRESH-VIDEO"
 elif [ "${CWPA:-0}" -gt 0 ] || [ "${WAV:-0}" -gt 5000 ]; then STATE="AUDIO-ONLY-stuck"
 elif [ "${TIME:-0}" -gt 0 ];                  then STATE="TIME-ONLY-stuck"

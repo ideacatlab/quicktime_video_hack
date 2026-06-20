@@ -151,7 +151,14 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 	// repeatedly WHILE the reader above is listening, until the first bytes (PING)
 	// arrive. Without this the handshake is racy and usually never starts.
 	useModeTransition := os.Getenv("QVH_RESET_MODE_TRANSITION") == "1"
+	skipRecycle := os.Getenv("QVH_NO_RECYCLE") == "1"
 	go func() {
+		// On a freshly (re)booted device the AV session initializes on its own and emits a
+		// natural CWPA; re-cycling can disrupt that. QVH_NO_RECYCLE=1 makes the reader just
+		// listen and catch the natural CWPA — the right mode for the reboot-reset recipe.
+		if skipRecycle {
+			return
+		}
 		for r := 0; r < 30 && atomic.LoadInt32(&gotData) == 0; r++ {
 			time.Sleep(2500 * time.Millisecond)
 			if atomic.LoadInt32(&gotData) != 0 {

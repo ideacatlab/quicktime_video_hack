@@ -74,3 +74,29 @@ Video confirmed: `SYNC_CVRP` (1126x2436 AVC-1 H.264) + HLS segments served throu
 
 ## UPDATE 2 (2026-06-20) — full system built; reliability is the open problem
 Built the multi-phone server+dashboard (deploy/server.js, dashboard.html; fixes the .ts MIME playback bug) behind the Cloudflare tunnel, API to list/start/stop/wake phones. Video proven end-to-end MANY times on a FRESH device state, but each phone gets STUCK audio-only after a session (soft re-cycle cannot clear it; QVH teardown SetConfig fails busy in mode-2). Needs the clean AV-teardown fix on a dedicated rig. See deploy/README.md "Reliability analysis".
+
+---
+## UPDATE 3 (2026-06-20) — THE RESET MECHANISM: reboot → fresh config-5 transition
+**Definitive root cause of the per-session reliability problem:** `CWPA` (which triggers the
+whole video chain) is only emitted on a **fresh transition INTO config 5**, not by a device
+already sitting on config 5. And nothing in software re-triggers that transition on a stuck
+device: `deactivate`/SetConfig fails `busy[-6]` (usbmuxd holds it), mode-1 won't downgrade a
+config-5 device, authorized-toggle drops it to config-1 (usbmuxd can't recover it).
+
+**The working reset = a phone REBOOT** (`idevicediagnostics restart -u <udid>`, software-only,
+no physical replug): the device power-cycles → comes back on config-4 → usbmuxd applies
+SET_MODE 2 → **fresh config-5 transition → natural CWPA**. PROVEN: a post-reboot capture got
+`CWPA + CVRP + 15 MB H.264`.
+
+**Catching the window (the remaining tuning):**
+- The fresh-CWPA window is ~80-90s after reboot, and the pod's **WDA attachment closes it** —
+  QVH must read the AV session in that window.
+- Re-cycling (disable/enable) during a *fresh* device can disrupt its natural CWPA. New flag
+  **`QVH_NO_RECYCLE=1`**: just listen → reliably catches the natural `CWPA` (verified).
+- `CVRP`/video then needs the **screen actually rendering** at that instant; right after a
+  boot WDA may not be up yet to wake it → racy. Making CVRP deterministic (wake-timing /
+  hold-pod-attach-until-QVH-has-the-session) is the final step — do it on a dedicated rig.
+
+**Recipe (current best):** reboot → poll config-5 → connect QVH early (`QVH_NO_RECYCLE=1`) →
+keep screen awake via WDA home-press → keep the capture persistent. Note: reboot drops the
+palera1n jailbreak (phones still work for WDA control + QVH — neither needs the jailbreak).
