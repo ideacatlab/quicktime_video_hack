@@ -71,3 +71,6 @@ config 5 (Valeria / AV mode):
 ---
 ## UPDATE 2026-06-20 — FULL POC WORKING END-TO-END
 Video confirmed: `SYNC_CVRP` (1126x2436 AVC-1 H.264) + HLS segments served through a Cloudflare tunnel, while the phone stayed WDA-`attached`. Reliability fixed by re-cycling the QT config *inside StartReading while reading* (see `screencapture/usbadapter.go`). Deploy pipeline in `deploy/`. Remaining polish: keep screen awake (auto-lock), tune encode/latency, optional WebRTC.
+
+## UPDATE 2 (2026-06-20) — full system built; reliability is the open problem
+Built the multi-phone server+dashboard (deploy/server.js, dashboard.html; fixes the .ts MIME playback bug) behind the Cloudflare tunnel, API to list/start/stop/wake phones. Video proven end-to-end MANY times on a FRESH device state, but each phone gets STUCK audio-only after a session (soft re-cycle cannot clear it; QVH teardown SetConfig fails busy in mode-2). Needs the clean AV-teardown fix on a dedicated rig. See deploy/README.md "Reliability analysis".

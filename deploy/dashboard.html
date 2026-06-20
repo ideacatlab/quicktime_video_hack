@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ALI · QuickTime Live</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
+<style>
+ :root{color-scheme:dark}
+ *{box-sizing:border-box}
+ body{background:#0a0a0f;color:#e8e8ec;font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+ header{padding:16px 22px;border-bottom:1px solid #20202a;display:flex;align-items:center;gap:14px;position:sticky;top:0;background:#0a0a0fee;backdrop-filter:blur(6px);z-index:5}
+ header h1{font-size:17px;margin:0;font-weight:650}
+ header .sub{font-size:12px;opacity:.5}
+ .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid #2c2c38;opacity:.85}
+ #count{margin-left:auto;font-size:12px;opacity:.6}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;padding:20px}
+ .card{background:#12121a;border:1px solid #20202a;border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+ .scr{position:relative;aspect-ratio:9/19.5;background:#000;display:flex;align-items:center;justify-content:center}
+ .scr video{width:100%;height:100%;object-fit:contain;background:#000}
+ .scr .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#8a8a98;font-size:13px;text-align:center;padding:14px}
+ .live{position:absolute;top:8px;left:8px;display:none;align-items:center;gap:5px;background:#000a;border:1px solid #e2304a;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;color:#ff5269}
+ .live.on{display:flex}
+ .live i{width:7px;height:7px;border-radius:50%;background:#e2304a;box-shadow:0 0 6px #e2304a;animation:b 1.4s infinite}
+ @keyframes b{50%{opacity:.35}}
+ .meta{padding:9px 11px;display:flex;align-items:center;gap:8px;border-top:1px solid #1c1c26}
+ .meta .nm{font-size:13px;font-weight:600}.meta .slot{font-size:11px;opacity:.45}
+ .st{font-size:10px;padding:2px 7px;border-radius:5px;border:1px solid #2c2c38;opacity:.8;margin-left:auto;text-transform:capitalize}
+ .st.attached{color:#4ad07a;border-color:#234a32}
+ .bar{display:flex;gap:6px;padding:0 11px 11px}
+ button{flex:1;background:#1b1b26;color:#dcdce4;border:1px solid #2c2c38;border-radius:8px;padding:8px;font-size:12px;font-weight:600;cursor:pointer}
+ button:hover{background:#23232f}button.pri{background:#2447d6;border-color:#2447d6;color:#fff}button.pri:hover{background:#2c52ee}
+ button:disabled{opacity:.4;cursor:default}
+ .err{color:#ff7a7a}
+</style></head><body>
+<header>
+  <h1>ALI · QuickTime Live</h1>
+  <span class="sub">iPhone hardware H.264 over USB → Cloudflare</span>
+  <span class="pill" id="src">ascensionpod1</span>
+  <span id="count">…</span>
+</header>
+<div class="grid" id="grid"></div>
+<script>
+var cards = {}; // udid -> {el, video, hls, live, ph, btnStart, btnWake, streaming}
+function api(p){ return fetch(p,{cache:'no-store'}).then(r=>r.json()).catch(function(){return null}); }
+
+function makeCard(ph){
+  var d=document.createElement('div'); d.className='card';
+  d.innerHTML =
+    '<div class="scr"><div class="live"><i></i>LIVE</div>'+
+      '<video muted playsinline></video>'+
+      '<div class="ph">tap <b>Start</b> to stream<br><span style="opacity:.6">screen must be awake</span></div></div>'+
+    '<div class="meta"><span class="nm">'+ph.short+'</span><span class="slot">slot '+(ph.slot==null?'?':ph.slot)+'</span>'+
+      '<span class="st '+(ph.state||'')+'">'+(ph.state||'—')+'</span></div>'+
+    '<div class="bar"><button class="pri start">▶ Start</button><button class="wake" disabled>☀ Wake</button><button class="stop" disabled>■ Stop</button></div>';
+  var c={el:d, video:d.querySelector('video'), live:d.querySelector('.live'), ph:d.querySelector('.ph'),
+    start:d.querySelector('.start'), wake:d.querySelector('.wake'), stop:d.querySelector('.stop'),
+    fs:d.querySelector('.scr'), data:ph, streaming:false, hls:null};
+  c.start.onclick=function(){ startStream(c); };
+  c.stop.onclick=function(){ stopStream(c); };
+  c.wake.onclick=function(){ api('/api/wake?udid='+ph.udid+'&port='+(ph.clientPort||'')); };
+  c.fs.ondblclick=function(){ if(c.video.requestFullscreen) c.video.requestFullscreen(); };
+  cards[ph.udid]=c; return c;
+}
+function startStream(c){
+  var ph=c.data;
+  c.start.disabled=true; c.ph.innerHTML='starting… arming the AV session<br><span style="opacity:.6">(can take ~10s)</span>';
+  api('/api/start?udid='+ph.udid+'&port='+(ph.clientPort||''));
+  c.streaming=true; c.wake.disabled=false; c.stop.disabled=false;
+  setTimeout(function(){ attachPlayer(c); }, 2500);
+}
+function attachPlayer(c){
+  var url='/'+c.data.udid+'/stream.m3u8';
+  if(c.hls){ try{c.hls.destroy()}catch(e){} }
+  if(window.Hls && Hls.isSupported()){
+    var h=new Hls({liveSyncDurationCount:3, maxBufferLength:8, backBufferLength:0, liveDurationInfinity:true,
+      manifestLoadingMaxRetry:1e9, manifestLoadingRetryDelay:1000, levelLoadingMaxRetry:1e9, fragLoadingMaxRetry:1e9});
+    c.hls=h; h.loadSource(url); h.attachMedia(c.video);
+    h.on(Hls.Events.MANIFEST_PARSED,function(){ c.video.play().catch(function(){}); });
+    h.on(Hls.Events.FRAG_BUFFERED,function(){ c.ph.style.display='none'; c.live.classList.add('on'); });
+    h.on(Hls.Events.ERROR,function(e,d){
+      if(d.fatal){
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ h.startLoad(); }
+        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ h.recoverMediaError(); }
+        else { setTimeout(function(){ attachPlayer(c); },1500); }
+      }
+    });
+  } else if(c.video.canPlayType('application/vnd.apple.mpegurl')){ c.video.src=url; c.video.play().catch(function(){}); }
+  // nudge to live edge + recover stalls
+  c._t=setInterval(function(){
+    if(!c.streaming) return;
+    var v=c.video;
+    if(v.readyState>=2 && !v.paused){ c.ph.style.display='none'; c.live.classList.add('on'); v.play().catch(function(){}); }
+    else { c.live.classList.remove('on'); if(c.ph.style.display==='none') c.ph.style.display=''; c.ph.innerHTML='waiting for frames…<br><span style="opacity:.6">press ☀ Wake if the screen slept</span>'; }
+    try{ var e=c.hls&&c.hls.liveSyncPosition; if(e&&e-v.currentTime>6) v.currentTime=e-0.3; }catch(_){}
+  },2000);
+}
+function stopStream(c){
+  c.streaming=false; clearInterval(c._t);
+  if(c.hls){ try{c.hls.destroy()}catch(e){} c.hls=null; }
+  c.video.removeAttribute('src'); c.live.classList.remove('on');
+  c.ph.style.display=''; c.ph.innerHTML='tap <b>Start</b> to stream';
+  c.start.disabled=false; c.wake.disabled=true; c.stop.disabled=true;
+  api('/api/stop?udid='+c.data.udid);
+}
+function refresh(){
+  api('/api/phones').then(function(list){
+    if(!list) return;
+    document.getElementById('count').textContent=list.length+' phones · '+list.filter(function(p){return p.streaming}).length+' streaming';
+    var grid=document.getElementById('grid');
+    list.forEach(function(ph){
+      var c=cards[ph.udid];
+      if(!c){ c=makeCard(ph); grid.appendChild(c.el); }
+      c.data=ph;
+      c.el.querySelector('.st').className='st '+(ph.state||''); c.el.querySelector('.st').textContent=ph.state||'—';
+    });
+  });
+}
+refresh(); setInterval(refresh, 5000);
+</script></body></html>

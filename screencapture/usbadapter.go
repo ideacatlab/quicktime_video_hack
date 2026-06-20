@@ -112,7 +112,6 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 				log.Errorf("Failed reading 4bytes length with err:%s only received: %d", err, n)
 				return
 			}
-			atomic.StoreInt32(&gotData, 1)
 			//the 4 bytes header are included in the length, so we need to subtract them
 			//here to know how long the payload will be
 			length := binary.LittleEndian.Uint32(lengthBuffer) - 4
@@ -124,6 +123,17 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 				var signal interface{}
 				stopSignal <- signal
 				return
+			}
+			// Mode-2 (ideacatlab): only treat the AV session as "armed" on a FRESH CWPA
+			// (audio-clock anchor). In mode 2 the device often keeps a leftover audio
+			// session alive, so QVH immediately reads audio (asyn) + SYNC_TIME without a
+			// fresh CWPA — and CWPA is what makes the messageprocessor send HPD1 (the video
+			// request). Gating strictly on CWPA keeps the re-cycle retry tearing down and
+			// re-arming until the device emits a fresh CWPA -> HPD1 -> CVRP -> video.
+			if atomic.LoadInt32(&gotData) == 0 && len(dataBuffer) >= 16 &&
+				binary.LittleEndian.Uint32(dataBuffer[0:4]) == 0x73796E63 &&
+				binary.LittleEndian.Uint32(dataBuffer[12:16]) == 0x63777061 {
+				atomic.StoreInt32(&gotData, 1)
 			}
 			if usbAdapter.Dump {
 				_, err := usbAdapter.DumpInWriter.Write(dataBuffer)
@@ -140,12 +150,12 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 	// repeatedly WHILE the reader above is listening, until the first bytes (PING)
 	// arrive. Without this the handshake is racy and usually never starts.
 	go func() {
-		for r := 0; r < 25 && atomic.LoadInt32(&gotData) == 0; r++ {
-			time.Sleep(1200 * time.Millisecond)
+		for r := 0; r < 30 && atomic.LoadInt32(&gotData) == 0; r++ {
+			time.Sleep(2500 * time.Millisecond)
 			if atomic.LoadInt32(&gotData) != 0 {
 				return
 			}
-			log.Debugf("no AV data yet (retry %d); re-cycling QT config to re-arm PING", r)
+			log.Debugf("no CWPA/AV yet (retry %d); re-cycling QT config to re-arm full A/V", r)
 			sendQTDisableConfigControlRequest(usbDevice)
 			sendQTConfigControlRequest(usbDevice)
 		}

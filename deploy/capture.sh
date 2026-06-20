@@ -15,7 +15,7 @@ while true; do
   ffmpeg -y -loglevel warning -fflags +genpts -r 30 -f h264 -i "$FIFO" -an \
     -vf "scale=-2:1024,format=yuv420p" \
     -c:v libx264 -preset veryfast -tune zerolatency -profile:v high -g 30 -keyint_min 30 \
-    -f hls -hls_time 1 -hls_list_size 6 -hls_flags delete_segments+append_list+omit_endlist \
+    -f hls -hls_time 1 -hls_list_size 8 -hls_flags delete_segments+omit_endlist+independent_segments \
     -hls_segment_filename "$SERVE/seg_%05d.ts" "$SERVE/stream.m3u8" >>/root/qvh-stream/ffmpeg.log 2>&1 &
   FF=$!
   sleep 1
