@@ -1,49 +1,48 @@
 #!/usr/bin/env python3
-# audio_feeder: read qvh's growing .wav (44B header + s16le/48k/stereo PCM) and emit a
-# CONTINUOUS real-time PCM stream (real audio when present, silence otherwise) to a fifo
-# for a SEPARATE audio ffmpeg. It reads a FILE (never blocks qvh) so the video pipeline is
-# fully decoupled and can never stall on audio.
+# Tail-follow QVH's growing audio .wav (s16le/48k/stereo, 44-byte RIFF header) and emit a
+# CONTINUOUS real-time s16le stream to FED (silence-padded when no new audio). Reads the FILE
+# with raw os.read (follows appends past EOF — no buffered-EOF caching), starting at the live
+# end so it stays in sync. Separate process: if FED's reader (audio ffmpeg) dies, only audio stops.
 import os, sys, time
-wav, out = sys.argv[1], sys.argv[2]
-CHUNK = 3840                 # 20 ms of s16le stereo @ 48000 Hz
+WAV, FED = sys.argv[1], sys.argv[2]
+RATE, CH, BPS = 48000, 2, 2
+TICK = 0.02                                  # 20ms
+CHUNK = int(RATE * CH * BPS * TICK)          # 3840 bytes / 20ms
 SILENCE = b'\x00' * CHUNK
-HDR = 44
-for _ in range(600):
-    if os.path.exists(wav):
-        break
+MAXBACKLOG = CHUNK * 10                       # cap ~200ms to avoid drift
+
+while not os.path.exists(WAV):
     time.sleep(0.05)
-try:
-    f = open(wav, 'rb')
-except Exception:
-    sys.exit(0)
-f.seek(HDR)
-try:
-    fo = open(out, 'wb', buffering=0)   # blocks until the audio ffmpeg opens the read end
-except Exception:
-    sys.exit(0)
-t = time.monotonic()
+fd = os.open(WAV, os.O_RDONLY)
+size = os.fstat(fd).st_size
+start = max(44, (size // 4) * 4)             # start at the LIVE end, 4-byte aligned, past header
+os.lseek(fd, start, os.SEEK_SET)
+
+fed = open(FED, 'wb', buffering=0)           # blocks until the audio-ffmpeg opens the read end
+buf = b''
+next_t = time.monotonic()
 while True:
     try:
-        sz = os.fstat(f.fileno()).st_size
-    except Exception:
-        sz = 0
-    pos = f.tell()
-    if pos > sz:                        # file truncated -> capture restarted
-        f.seek(HDR)
-    elif sz - pos > 192000:             # >1s behind live -> jump to ~0.4s behind
-        f.seek(sz - 76800)
-    data = f.read(CHUNK)
-    if not data:
-        data = SILENCE
-    elif len(data) < CHUNK:
-        data = data + SILENCE[len(data):]
+        while True:
+            d = os.read(fd, 65536)
+            if not d:
+                break
+            buf += d
+    except OSError:
+        pass
+    if len(buf) >= CHUNK:
+        out, buf = buf[:CHUNK], buf[CHUNK:]
+        if len(buf) > MAXBACKLOG:            # stay live: drop stale backlog
+            buf = buf[-MAXBACKLOG:]
+    else:
+        out, buf = buf + SILENCE[:CHUNK - len(buf)], b''
     try:
-        fo.write(data)
-    except Exception:
+        fed.write(out)
+    except (BrokenPipeError, OSError):
         break
-    t += 0.02
-    d = t - time.monotonic()
-    if d > 0:
-        time.sleep(d)
-    elif d < -0.1:
-        t = time.monotonic()
+    next_t += TICK
+    s = next_t - time.monotonic()
+    if s > 0:
+        time.sleep(s)
+    else:
+        next_t = time.monotonic()
