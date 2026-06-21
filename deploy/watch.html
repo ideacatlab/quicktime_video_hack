@@ -1,0 +1,55 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QVH · live</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
+<style>
+  html,body{height:100%}
+  body{background:#000;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#eee;gap:12px;padding:10px;box-sizing:border-box}
+  .wrap{position:relative;display:inline-block}
+  video{max-width:96vw;max-height:82vh;background:#111;border-radius:10px;display:block}
+  .badge{position:absolute;top:10px;left:10px;background:rgba(220,30,30,.92);color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;padding:4px 9px;border-radius:6px;display:none;align-items:center;gap:5px}
+  .badge.on{display:inline-flex}
+  .badge .dot{width:8px;height:8px;border-radius:50%;background:#fff;animation:bl 1.4s infinite}
+  @keyframes bl{50%{opacity:.25}}
+  .controls{display:flex;gap:10px;align-items:center}
+  button{padding:11px 20px;font-size:15px;font-weight:700;color:#fff;border:0;border-radius:9px;cursor:pointer;background:#2447d6}
+  button.on{background:#1c8a3a}
+  #s{opacity:.6;font-size:12px;margin:0}
+</style></head><body>
+<div class="wrap">
+  <video id="v" autoplay playsinline muted></video>
+  <span class="badge" id="badge"><span class="dot"></span>LIVE</span>
+</div>
+<div class="controls">
+  <button id="snd">🔇 Tap for sound</button>
+  <button id="fs">⛶ Fullscreen</button>
+</div>
+<p id="s">connecting…</p>
+<script>
+var u=new URLSearchParams(location.search).get('u');
+var v=document.getElementById('v'), s=document.getElementById('s'), badge=document.getElementById('badge');
+var url='/'+u+'/stream.m3u8', hls=null;
+document.getElementById('snd').onclick=function(){
+  if(v.muted){ v.muted=false; v.volume=1; v.play().catch(function(){}); this.textContent='🔊 Sound on'; this.className='on'; }
+  else { v.muted=true; this.textContent='🔇 Tap for sound'; this.className=''; }
+};
+document.getElementById('fs').onclick=function(){ if(v.requestFullscreen) v.requestFullscreen(); };
+function toLive(){ try{ var e=hls&&hls.liveSyncPosition; if(e&&e-v.currentTime>6) v.currentTime=e-0.3; }catch(_){} }
+function go(){
+  if(window.Hls && Hls.isSupported()){
+    hls=new Hls({liveSyncDurationCount:3, maxBufferLength:8, backBufferLength:0, liveDurationInfinity:true, lowLatencyMode:true});
+    hls.loadSource(url); hls.attachMedia(v);
+    hls.on(Hls.Events.MANIFEST_PARSED,function(){ v.play().catch(function(){}); });
+    hls.on(Hls.Events.FRAG_BUFFERED,function(){ badge.classList.add('on'); s.textContent='● live'; });
+    hls.on(Hls.Events.ERROR,function(e,d){
+      if(d.fatal){
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ s.textContent='reconnecting…'; hls.startLoad(); }
+        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ hls.recoverMediaError(); }
+        else { badge.classList.remove('on'); s.textContent='waiting for stream…'; try{hls.destroy();}catch(_){} setTimeout(go,2500); }
+      }
+    });
+  } else if(v.canPlayType('application/vnd.apple.mpegurl')){ v.src=url; v.play().catch(function(){}); badge.classList.add('on'); }
+}
+v.addEventListener('waiting',toLive); v.addEventListener('stalled',toLive); v.addEventListener('ended',toLive);
+setInterval(toLive,2000);
+go();
+</script></body></html>
