@@ -42,3 +42,13 @@ pod-side segment checks miss. Captures console errors + a screenshot.
 Repeated probing + direct libusb access contends with usbmuxd and degrades the WDA control
 path (measured: control lag + `guess_mode` failing so mode-2 stops applying fleet-wide).
 Use a spare Linux box + 2–3 jailbroken iOS≤16 phones where usbmuxd can be stopped.
+
+## selftest.js — autonomous E2E browser test (with operator session)
+Drives `dev.aliremote.com` phone pages (auth, stream render, tap-on-screen) **and** `qvh.turbocat.dk`
+in headless Chromium using the operator's logged-in session — so the agent self-tests without a human.
+Setup (one-time): extract Firefox cookies →
+`cp ~/.mozilla/firefox/<profile>/cookies.sqlite /tmp/ffc.sqlite` then a small sqlite→Playwright-JSON
+converter writing `/tmp/pw_cookies.json` (accessToken + communicationToken are the auth cookies; QVH app
+needs none). Run: `NODE_PATH=/tmp/pw/node_modules node tools/selftest.js <udid>` → reports auth/stream/
+control + writes `/tmp/st_dash.png`, `/tmp/st_qvh.png`. **Note:** `/tmp/pw_cookies.json` holds live auth —
+local-only, never commit; rotate the session if leaked.
