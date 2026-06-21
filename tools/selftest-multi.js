@@ -29,11 +29,15 @@ const cookies = JSON.parse(fs.readFileSync('/tmp/pw_cookies.json', 'utf8'));
   }
   console.error('cookies injected:', ck + '/' + cookies.length, '| phones:', udids.length);
 
-  const page = await ctx.newPage();
   const results = [];
   for (let i = 0; i < udids.length; i++) {
     const udid = udids[i];
     const r = { udid: udid.slice(0, 8), loggedIn: false, render: false, w: 0, h: 0, renderMs: null, fps: null, err: null };
+    // Fresh page per phone: MJPEG is a long-lived <img> connection and the SPA's
+    // hash-route nav leaks it, so a reused page hits the browser's ~6-per-host
+    // connection cap and phones 7+ falsely report render:false. A new page (closed
+    // after) tears the connection down and gives each phone a clean slot.
+    const page = await ctx.newPage();
     try {
       await page.goto('https://dev.aliremote.com/#/phone/' + udid, { waitUntil: 'load', timeout: 40000 });
       // poll up to 12s for the stream <img> to actually decode a frame
@@ -76,11 +80,12 @@ const cookies = JSON.parse(fs.readFileSync('/tmp/pw_cookies.json', 'utf8'));
     results.push(r);
     console.log('RESULT:' + JSON.stringify(r));
     if (i === 0) await page.screenshot({ path: '/tmp/st_dash.png' });
+    else if (i === udids.length - 1) await page.screenshot({ path: '/tmp/st_dash_last.png' });
+    await page.close();
   }
-  // last phone screenshot too
-  await page.screenshot({ path: '/tmp/st_dash_last.png' });
 
   // QVH app probe
+  const page = await ctx.newPage();
   let qvh = { err: null };
   try {
     await page.goto('https://qvh.turbocat.dk/', { waitUntil: 'load', timeout: 30000 });
