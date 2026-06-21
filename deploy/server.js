@@ -46,16 +46,23 @@ function startCapture(udid, clientPort) {
   fs.mkdirSync(dir, { recursive: true });
   for (const f of fs.readdirSync(dir)) if (/seg_|stream\.m3u8/.test(f)) try { fs.unlinkSync(path.join(dir, f)); } catch (e) {}
   const fifo = '/tmp/qvh_' + udid + '.h264';
-  try { fs.unlinkSync(fifo); } catch (e) {}
-  try { execSync('mkfifo ' + fifo); } catch (e) {}
-  const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-fflags', '+genpts', '-r', '30', '-f', 'h264', '-i', fifo,
-    '-an', '-vf', 'scale=-2:1024,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
-    '-profile:v', 'high', '-g', '30', '-keyint_min', '30', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '8',
+  const afifo = '/tmp/qvh_' + udid + '.pcm';
+  for (const f of [fifo, afifo]) { try { fs.unlinkSync(f); } catch (e) {} try { execSync('mkfifo ' + f); } catch (e) {} }
+  // mux QVH H.264 video (fifo) + QVH raw PCM audio (s16le 48kHz stereo, from the AFMT handshake) -> HLS w/ AAC.
+  const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-fflags', '+genpts',
+    '-r', '30', '-f', 'h264', '-i', fifo,
+    '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', afifo,
+    '-map', '0:v:0', '-map', '1:a:0',
+    '-vf', 'scale=-2:1024,format=yuv420p',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-g', '30', '-keyint_min', '30',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+    '-f', 'hls', '-hls_time', '1', '-hls_list_size', '8',
     '-hls_flags', 'delete_segments+omit_endlist+independent_segments', '-hls_segment_filename', path.join(dir, 'seg_%05d.ts'),
     path.join(dir, 'stream.m3u8')], { stdio: 'ignore' });
-  const qv = spawn(QVH, ['record', fifo, '/tmp/qvh_' + udid + '.wav', '--udid=' + udid], { stdio: 'ignore' });
+  // QVH writes H.264 to fifo + raw PCM audio to afifo. NO_RECYCLE = catch the natural CWPA (reboot-fresh devices).
+  const qv = spawn(QVH, ['record', fifo, afifo, '--udid=' + udid], { stdio: 'ignore', env: { ...process.env, QVH_NO_RECYCLE: '1' } });
   const ka = setInterval(() => tap(udid), 15000);
-  captures[udid] = { qvh: qv, ffmpeg: ff, fifo, ka, startedAt: Date.now() };
+  captures[udid] = { qvh: qv, ffmpeg: ff, fifo, afifo, ka, startedAt: Date.now() };
   wake(udid, clientPort);
   qv.on('exit', () => { const c = captures[udid]; if (c && c.qvh === qv) { try { c.ffmpeg.kill(); } catch (e) {} clearInterval(c.ka); delete captures[udid]; } });
 }
@@ -65,6 +72,7 @@ function stopCapture(udid) {
   try { c.qvh.kill('SIGKILL'); } catch (e) {}
   try { c.ffmpeg.kill('SIGKILL'); } catch (e) {}
   try { fs.unlinkSync(c.fifo); } catch (e) {}
+  try { fs.unlinkSync(c.afifo); } catch (e) {}
   delete captures[udid];
 }
 
