@@ -2,6 +2,13 @@
 // Serves a dashboard + per-phone HLS with CORRECT mime (video/mp2t) and no-cache,
 // and an API to list phones (from the pod ledger), start/stop a phone's QVH capture
 // on demand, and wake its screen via WDA. No npm deps — Node built-ins only.
+//
+// Runs under systemd `qvh-server.service` (Restart=always, RestartSec=3, enabled at
+// boot) so a crash self-heals in <5s. RESILIENCE RULE for cleanup scripts: kill only
+// the per-capture children (`qvh record …` / `ffmpeg …`), NEVER `systemctl stop
+// qvh-server` or `pkill node` — that takes the dashboard offline (was the 502 cause).
+// Liveness probe: GET /healthz (cheap, no pod call). A per-capture watchdog reaps any
+// half-dead capture (ffmpeg died but qvh alive, or vice-versa) so the slot frees.
 const http = require('http');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
@@ -11,8 +18,19 @@ const SERVE = '/root/qvh-stream/serve';
 const QVH = '/root/qvh-test/qvh';
 const POD = { host: '127.0.0.1', port: 7799 };
 const captures = {}; // udid -> {qvh, ffmpeg, fifo, ka, startedAt}
+const startedAt = Date.now();
 
 fs.mkdirSync(SERVE, { recursive: true });
+
+// Reap half-dead captures: if either child (qvh or ffmpeg) has exited but the entry
+// lingers, tear the whole capture down so the slot frees and a restart can re-arm.
+setInterval(() => {
+  for (const udid of Object.keys(captures)) {
+    const c = captures[udid];
+    const dead = (c.qvh && c.qvh.exitCode !== null) || (c.ffmpeg && c.ffmpeg.exitCode !== null);
+    if (dead) { try { stopCapture(udid); } catch (e) {} }
+  }
+}, 10000).unref();
 
 function podState(cb) {
   http.get({ ...POD, path: '/state', timeout: 6000 }, r => {
@@ -53,8 +71,7 @@ function startCapture(udid, clientPort) {
     '-r', '30', '-f', 'h264', '-i', fifo,
     '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', afifo,
     '-map', '0:v:0', '-map', '1:a:0',
-    '-vf', 'scale=-2:1024,format=yuv420p',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-g', '30', '-keyint_min', '30',
+    '-c:v', 'copy',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
     '-f', 'hls', '-hls_time', '1', '-hls_list_size', '8',
     '-hls_flags', 'delete_segments+omit_endlist+independent_segments', '-hls_segment_filename', path.join(dir, 'seg_%05d.ts'),
@@ -82,6 +99,7 @@ const NOCACHE = { 'cache-control': 'no-store, no-cache, must-revalidate', 'acces
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
+  if (p === '/healthz') { res.writeHead(200, { 'content-type': 'application/json', ...NOCACHE }); res.end(JSON.stringify({ ok: true, captures: Object.keys(captures).length, uptimeS: Math.round((Date.now() - startedAt) / 1000) })); return; }
   if (p === '/api/phones') { phones(list => { res.writeHead(200, { 'content-type': 'application/json', ...NOCACHE }); res.end(JSON.stringify(list)); }); return; }
   if (p === '/api/start') { startCapture(u.searchParams.get('udid'), u.searchParams.get('port')); res.writeHead(200, NOCACHE); res.end('{"ok":true}'); return; }
   if (p === '/api/stop') { stopCapture(u.searchParams.get('udid')); res.writeHead(200, NOCACHE); res.end('{"ok":true}'); return; }

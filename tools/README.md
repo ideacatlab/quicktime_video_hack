@@ -43,6 +43,27 @@ Repeated probing + direct libusb access contends with usbmuxd and degrades the W
 path (measured: control lag + `guess_mode` failing so mode-2 stops applying fleet-wide).
 Use a spare Linux box + 2–3 jailbroken iOS≤16 phones where usbmuxd can be stopped.
 
+## selftest-multi.js — many-phone autonomous E2E (machine-readable)
+Loops `selftest.js`'s dashboard check over a LIST of phones and emits one `RESULT:{json}`
+line per phone (`render`, `w/h`, `renderMs`, `fps`) plus a final `SUMMARY:{json}` and a
+`QVH:{json}` probe — so an agent can self-test a whole pod and diff runs.
+`NODE_PATH=/tmp/pw/node_modules node tools/selftest-multi.js <udid…>` or `--file /tmp/udids.txt`.
+Screenshots: `/tmp/st_dash.png` (first phone), `/tmp/st_dash_last.png`, `/tmp/st_qvh.png`.
+**Gotcha learned (2026-06-21):** do NOT run this concurrently with heavy Appium load
+(admin `/admin/screenshot` polling, control-verify sweeps). WDA's screenshot RPC and the
+MJPEG pump share the testmanagerd path, so concurrent screenshotting starves the stream
+and makes healthy phones report `render:false`. Re-test suspects in isolation before
+calling a stream broken (5/5 false-positives flipped to `render:true` when run alone).
+
+### Control-verify (pod-side, loopback)
+To prove control *lands* (not just that the UI sends it), on the pod loop over
+`:7799/state` attached phones: md5 a `/admin/screenshot`, POST `/admin/control/swipe`
+`{"direction":"left"}` (capture `%{http_code}` + `%{time_total}` with `-o file` so the
+JSON body doesn't corrupt the parse), sleep 1.5s, md5 again → `200`+`"ok":true` = WDA
+executed it; md5 delta = visible effect. 2026-06-21 run: 20/21 LAND, median 0.84s.
+A `409 no-session` = phone attached but with no live Appium session (control+screenshot
+both fail) — a real stuck-attached fault distinct from a dead stream.
+
 ## selftest.js — autonomous E2E browser test (with operator session)
 Drives `dev.aliremote.com` phone pages (auth, stream render, tap-on-screen) **and** `qvh.turbocat.dk`
 in headless Chromium using the operator's logged-in session — so the agent self-tests without a human.
