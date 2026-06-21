@@ -1,55 +1,50 @@
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QVH · live</title>
+<title>ALI · QuickTime Live</title>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
 <style>
-  html,body{height:100%}
-  body{background:#000;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#eee;gap:12px;padding:10px;box-sizing:border-box}
-  .wrap{position:relative;display:inline-block}
-  video{max-width:96vw;max-height:82vh;background:#111;border-radius:10px;display:block}
-  .badge{position:absolute;top:10px;left:10px;background:rgba(220,30,30,.92);color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;padding:4px 9px;border-radius:6px;display:none;align-items:center;gap:5px}
-  .badge.on{display:inline-flex}
-  .badge .dot{width:8px;height:8px;border-radius:50%;background:#fff;animation:bl 1.4s infinite}
-  @keyframes bl{50%{opacity:.25}}
-  .controls{display:flex;gap:10px;align-items:center}
-  button{padding:11px 20px;font-size:15px;font-weight:700;color:#fff;border:0;border-radius:9px;cursor:pointer;background:#2447d6}
-  button.on{background:#1c8a3a}
-  #s{opacity:.6;font-size:12px;margin:0}
+body{background:#000;margin:0;display:flex;flex-direction:column;align-items:center;font-family:system-ui,sans-serif;color:#eee;padding:8px}
+.wrap{position:relative;max-width:430px;width:96vw}
+video{width:100%;background:#111;border-radius:10px;display:block}
+.live{position:absolute;top:10px;left:10px;background:#e00;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:5px;letter-spacing:.5px;display:flex;align-items:center;gap:5px}
+.live::before{content:"";width:7px;height:7px;background:#fff;border-radius:50%;animation:b 1s infinite}
+@keyframes b{50%{opacity:.3}}
+.bar{display:flex;gap:10px;margin-top:12px}
+button{padding:12px 22px;font-size:15px;font-weight:700;border:0;border-radius:9px;cursor:pointer;color:#fff}
+#snd{background:#16a34a}#snd.on{background:#2447d6}#fs{background:#2447d6}
+#st{opacity:.6;font-size:12px;margin-top:8px}
 </style></head><body>
 <div class="wrap">
   <video id="v" autoplay playsinline muted></video>
-  <span class="badge" id="badge"><span class="dot"></span>LIVE</span>
+  <div class="live" id="badge" style="display:none">LIVE</div>
 </div>
-<div class="controls">
-  <button id="snd">🔇 Tap for sound</button>
+<audio id="a" autoplay muted></audio>
+<div class="bar">
+  <button id="snd">🔊 Tap for sound</button>
   <button id="fs">⛶ Fullscreen</button>
 </div>
-<p id="s">connecting…</p>
+<p id="st">connecting…</p>
 <script>
 var u=new URLSearchParams(location.search).get('u');
-var v=document.getElementById('v'), s=document.getElementById('s'), badge=document.getElementById('badge');
-var url='/'+u+'/stream.m3u8', hls=null;
+var v=document.getElementById('v'), a=document.getElementById('a'), st=document.getElementById('st'), badge=document.getElementById('badge');
+var HCFG={liveSyncDurationCount:3,liveMaxLatencyDurationCount:10,lowLatencyMode:true,backBufferLength:0,liveDurationInfinity:true};
+function attach(el,url,onlive){
+  if(window.Hls && Hls.isSupported()){
+    var h=new Hls(HCFG); h.loadSource(url); h.attachMedia(el);
+    h.on(Hls.Events.MANIFEST_PARSED,function(){el.play().catch(function(){});});
+    h.on(Hls.Events.ERROR,function(e,d){if(d&&d.fatal){try{h.startLoad();}catch(x){} setTimeout(function(){try{h.loadSource(url);h.startLoad();}catch(x){}},2000);}});
+    el._hls=h; el._url=url;
+  } else if(el.canPlayType('application/vnd.apple.mpegurl')){ el.src=url; }
+}
+function keepLive(el){ var h=el._hls; if(h && h.liveSyncPosition!=null && el.buffered.length){ var lag=h.liveSyncPosition-el.currentTime; if(lag>6||lag< -1) try{el.currentTime=h.liveSyncPosition;}catch(e){} } }
+attach(v,'/'+u+'/stream.m3u8');
+attach(a,'/'+u+'/audio.m3u8');
+v.addEventListener('playing',function(){st.textContent='● live';badge.style.display='flex';});
+v.addEventListener('waiting',function(){keepLive(v);});
+setInterval(function(){keepLive(v);keepLive(a);},2000);
 document.getElementById('snd').onclick=function(){
-  if(v.muted){ v.muted=false; v.volume=1; v.play().catch(function(){}); this.textContent='🔊 Sound on'; this.className='on'; }
-  else { v.muted=true; this.textContent='🔇 Tap for sound'; this.className=''; }
+  a.muted=false; a.volume=1; a.play().catch(function(){});
+  keepLive(a);
+  this.textContent='🔊 Sound ON'; this.classList.add('on');
 };
 document.getElementById('fs').onclick=function(){ if(v.requestFullscreen) v.requestFullscreen(); };
-function toLive(){ try{ var e=hls&&hls.liveSyncPosition; if(e&&e-v.currentTime>6) v.currentTime=e-0.3; }catch(_){} }
-function go(){
-  if(window.Hls && Hls.isSupported()){
-    hls=new Hls({liveSyncDurationCount:3, maxBufferLength:8, backBufferLength:0, liveDurationInfinity:true, lowLatencyMode:true});
-    hls.loadSource(url); hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED,function(){ v.play().catch(function(){}); });
-    hls.on(Hls.Events.FRAG_BUFFERED,function(){ badge.classList.add('on'); s.textContent='● live'; });
-    hls.on(Hls.Events.ERROR,function(e,d){
-      if(d.fatal){
-        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ s.textContent='reconnecting…'; hls.startLoad(); }
-        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ hls.recoverMediaError(); }
-        else { badge.classList.remove('on'); s.textContent='waiting for stream…'; try{hls.destroy();}catch(_){} setTimeout(go,2500); }
-      }
-    });
-  } else if(v.canPlayType('application/vnd.apple.mpegurl')){ v.src=url; v.play().catch(function(){}); badge.classList.add('on'); }
-}
-v.addEventListener('waiting',toLive); v.addEventListener('stalled',toLive); v.addEventListener('ended',toLive);
-setInterval(toLive,2000);
-go();
 </script></body></html>
