@@ -18,17 +18,30 @@ type IosDevice struct {
 	VID               gousb.ID
 	PID               gousb.ID
 	UsbInfo           string
+	// Bus/Address pin the exact device so OpenDevice can libusb_open ONLY this phone instead of the
+	// whole fleet (see OpenDevice). Populated by mapToIosDevice from the gousb DeviceDesc.
+	Bus     int
+	Address int
 }
 
 //OpenDevice finds a gousb.Device by using the provided iosDevice.SerialNumber. It returns an open device handle.
 //Opening using VID and PID is not specific enough, as different iOS devices can have identical VID/PID combinations.
 func OpenDevice(ctx *gousb.Context, iosDevice IosDevice) (*gousb.Device, error) {
 	deviceList, err := ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
+		// CRITICAL (ALI): open ONLY the target phone, by bus/address. The original `return true`
+		// made libusb_open EVERY phone on the host (+ an EP0 serial-descriptor read on each) on
+		// EVERY arm — N×N contention that disrupts usbmuxd and yields "no device [-4]" at fleet
+		// scale (a single arm survives; many in succession wedge usbmuxd). Opening only the one
+		// device collapses that to a single open + single EP0 read. Falls back to the legacy scan
+		// only if bus/address are unknown (shouldn't happen — discovery populates them).
+		if iosDevice.Bus != 0 || iosDevice.Address != 0 {
+			return desc.Bus == iosDevice.Bus && desc.Address == iosDevice.Address
+		}
 		return true
 	})
 
 	if err != nil {
-		log.Warn("Error opening usb devices", err)
+		log.Warn("Error opening usb device", err)
 	}
 	var usbDevice *gousb.Device = nil
 	for _, device := range deviceList {
@@ -145,7 +158,7 @@ func mapToIosDevice(devices []*gousb.Device) ([]IosDevice, error) {
 		}
 
 		muxConfigIndex, qtConfigIndex := findConfigurations(d.Desc)
-		iosDevice := IosDevice{serial, product, muxConfigIndex, qtConfigIndex, d.Desc.Vendor, d.Desc.Product, d.String()}
+		iosDevice := IosDevice{serial, product, muxConfigIndex, qtConfigIndex, d.Desc.Vendor, d.Desc.Product, d.String(), d.Desc.Bus, d.Desc.Address}
 		d.Close()
 		iosDevices[i] = iosDevice
 
