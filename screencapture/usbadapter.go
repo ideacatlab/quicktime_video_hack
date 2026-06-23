@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -135,21 +136,35 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 		}
 	}()
 
-	// Mode-2 reliability (ideacatlab): the device only emits PING right after the AV
-	// session is (re)armed; usbmuxd already holds config 5, so re-cycle the QT config
-	// repeatedly WHILE the reader above is listening, until the first bytes (PING)
-	// arrive. Without this the handshake is racy and usually never starts.
-	go func() {
-		for r := 0; r < 25 && atomic.LoadInt32(&gotData) == 0; r++ {
-			time.Sleep(1200 * time.Millisecond)
-			if atomic.LoadInt32(&gotData) != 0 {
-				return
+	// AV arming (ideacatlab). The device emits PING/CWPA right after it enters the Valeria
+	// config (config 5). Two strategies:
+	//
+	//   - JUST-LISTEN (default): the reader above simply listens and catches the PING/CWPA that
+	//     is pending from the config-5 transition usbmuxd already performed (mode-2). This is the
+	//     correct path on the ALI fleet, where usbmuxd OWNS config 5 (USBMUXD_DEFAULT_DEVICE_MODE=2):
+	//     issuing our own SET_MODE 0x52 here just FIGHTS usbmuxd for the device mode (proven to
+	//     wedge usbmuxd blind → whole-fleet outage) AND does not actually re-arm a settled device
+	//     (SET_MODE is ignored once config 5 is claimed — verified). So by default we do NOT
+	//     re-cycle: no contention.
+	//
+	//   - RE-CYCLE (QVH_FORCE_RECYCLE=1): the legacy behavior — re-cycle the QT config (SET_MODE
+	//     disable+enable) repeatedly while reading. Only useful when qvh, not usbmuxd, drives the
+	//     device mode (no mode-2 usbmuxd). Kept as an escape hatch.
+	if os.Getenv("QVH_FORCE_RECYCLE") == "1" {
+		go func() {
+			for r := 0; r < 25 && atomic.LoadInt32(&gotData) == 0; r++ {
+				time.Sleep(1200 * time.Millisecond)
+				if atomic.LoadInt32(&gotData) != 0 {
+					return
+				}
+				log.Debugf("no AV data yet (retry %d); re-cycling QT config to re-arm PING", r)
+				sendQTDisableConfigControlRequest(usbDevice)
+				sendQTConfigControlRequest(usbDevice)
 			}
-			log.Debugf("no AV data yet (retry %d); re-cycling QT config to re-arm PING", r)
-			sendQTDisableConfigControlRequest(usbDevice)
-			sendQTConfigControlRequest(usbDevice)
-		}
-	}()
+		}()
+	} else {
+		log.Debug("QVH just-listen mode (no SET_MODE re-cycle) — usbmuxd owns config 5; catching the pending CWPA")
+	}
 
 	<-stopSignal
 	receiver.CloseSession()
@@ -162,11 +177,17 @@ func (usbAdapter *UsbAdapter) StartReading(device IosDevice, receiver UsbDataRec
 	log.Info("Closing usb interface")
 	iface.Close()
 
-	sendQTDisableConfigControlRequest(usbDevice)
-	log.Debug("Resetting device config")
-	_, err = usbDevice.Config(device.UsbMuxConfigIndex)
-	if err != nil {
-		log.Warn(err)
+	// On teardown, only drive the device mode back to usbmux when WE own it (legacy re-cycle
+	// mode). On the mode-2 fleet usbmuxd owns config 5: issuing SET_MODE here fights it
+	// (fails busy[-6]) and would drift the device toward config 4, breaking the next arm. So in
+	// just-listen mode we leave the device on config 5 and let usbmuxd keep owning it.
+	if os.Getenv("QVH_FORCE_RECYCLE") == "1" {
+		sendQTDisableConfigControlRequest(usbDevice)
+		log.Debug("Resetting device config")
+		_, err = usbDevice.Config(device.UsbMuxConfigIndex)
+		if err != nil {
+			log.Warn(err)
+		}
 	}
 
 	return nil
